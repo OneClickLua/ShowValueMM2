@@ -5,6 +5,7 @@ end
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer or Players:GetPropertyChangedSignal("LocalPlayer"):Wait() or Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 -- === 1. ЗАГРУЗКА БАЗЫ ЦЕН ===
 local PRICES_URL = "https://raw.githubusercontent.com/Kenderlike/test/main/prices.json"
@@ -32,7 +33,21 @@ task.spawn(function()
     end
 end)
 
--- === 2. ПЛАШКА ЦЕНЫ (ПК + ТЕЛЕФОН) ===
+-- Проверка, что элемент и все его родительские окна реально открыты на экране
+local function isActuallyVisible(obj)
+    local curr = obj
+    while curr and curr ~= PlayerGui do
+        if curr:IsA("GuiObject") and not curr.Visible then
+            return false
+        elseif curr:IsA("ScreenGui") and not curr.Enabled then
+            return false
+        end
+        curr = curr.Parent
+    end
+    return curr == PlayerGui
+end
+
+-- === 2. ПЛАШКА ЦЕНЫ ===
 local function updatePriceTag(targetFrame, price)
     if not targetFrame or not targetFrame:IsA("GuiObject") then return end
     local w, h = targetFrame.AbsoluteSize.X, targetFrame.AbsoluteSize.Y
@@ -85,9 +100,18 @@ local function parseNumericPrice(val)
     return 0
 end
 
--- === 3. ОБРАБОТКА КОНТЕЙНЕРОВ ===
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+-- Находим строго слот предмета, не трогая кнопки интерфейса
+local function getSlotCell(el)
+    local cell = el:FindFirstAncestor("NewItem") or el:FindFirstAncestor("ItemFrame")
+    if cell then return cell end
+    local p = el.Parent
+    if p and p:IsA("GuiObject") and (p:FindFirstChild("ItemName") or p:FindFirstChild("Amount") or (p.Parent and p.Parent:FindFirstChild("ItemName"))) then
+        return p
+    end
+    return nil
+end
 
+-- === 3. ОБРАБОТКА СЛОТОВ ===
 local function processContainer(container, isOffer)
     local sum = 0
     local items = {}
@@ -96,11 +120,11 @@ local function processContainer(container, isOffer)
     if not container then return end
 
     for _, el in ipairs(container:GetDescendants()) do
-        if (el:IsA("ImageLabel") or el:IsA("ImageButton")) and el.Visible then
+        if el:IsA("ImageLabel") and el.Visible then
             local assetId = extractAssetId(el.Image)
             
-            if assetId and assetPrices[tostring(assetId)] then
-                local cell = el:FindFirstAncestor("NewItem") or el:FindFirstAncestor("ItemFrame") or el.Parent
+            if assetId and assetPrices[tostring(assetId)] and isActuallyVisible(el) then
+                local cell = getSlotCell(el)
                 
                 if cell and not processedCells[cell] then
                     processedCells[cell] = true
@@ -133,11 +157,14 @@ end
 
 local function handleTradeGui(tradeGui)
     if not tradeGui or not tradeGui.Enabled then return end
-    processContainer(tradeGui, false)
-
-    local tradeContainer = tradeGui:FindFirstChild("Container")
-    local tradeBase = (tradeContainer and tradeContainer:FindFirstChild("Trade")) or tradeGui:FindFirstChild("Trade", true)
     
+    -- Ждем, пока откроется само окно обмена (чтобы не ломать запрос на трейд)
+    local tradeContainer = tradeGui:FindFirstChild("Container")
+    if not tradeContainer or not isActuallyVisible(tradeContainer) then return end
+
+    processContainer(tradeContainer, false)
+
+    local tradeBase = tradeContainer:FindFirstChild("Trade")
     if tradeBase then
         local yourOfferBlock = tradeBase:FindFirstChild("YourOffer")
         local theirOfferBlock = tradeBase:FindFirstChild("TheirOffer")
@@ -163,40 +190,18 @@ local function handleTradeGui(tradeGui)
     end
 end
 
--- === 4. ОСНОВНОЙ ЦИКЛ (ПК + ТЕЛЕФОН) ===
+-- === 4. ОСНОВНОЙ ЦИКЛ ===
 task.spawn(function()
     while not pricesLoaded do task.wait(0.5) end
 
     while task.wait(0.5) do
         pcall(function()
-            -- 1. Трейды (ПК и Телефон)
             handleTradeGui(PlayerGui:FindFirstChild("TradeGUI"))
             handleTradeGui(PlayerGui:FindFirstChild("TradeGUI_Phone"))
 
-            -- 2. Инвентарь, профили, крафт (ПК и Телефон)
             local mainGui = PlayerGui:FindFirstChild("MainGUI")
-            if mainGui then
-                -- ПК ветка (MainGUI.Game)
-                local gameFrame = mainGui:FindFirstChild("Game")
-                if gameFrame then
-                    for _, name in ipairs({"Inventory", "ViewProfile", "Crafting", "PlayerMenu"}) do
-                        local sub = gameFrame:FindFirstChild(name)
-                        if sub and sub.Visible then
-                            processContainer(sub, false)
-                        end
-                    end
-                end
-
-                -- Телефонная ветка (MainGUI.Lobby)
-                local lobbyFrame = mainGui:FindFirstChild("Lobby")
-                if lobbyFrame then
-                    local screens = lobbyFrame:FindFirstChild("Screens") or lobbyFrame
-                    for _, child in ipairs(screens:GetChildren()) do
-                        if child:IsA("GuiObject") and child.Visible and child.Name ~= "Dock" and child.Name ~= "Leaderboard" then
-                            processContainer(child, false)
-                        end
-                    end
-                end
+            if mainGui and mainGui.Enabled then
+                processContainer(mainGui, false)
             end
         end)
     end
